@@ -16,4 +16,4 @@ And run `bundle install`. The rest of the installation depends on whether the as
 
 The parsejs-rails file will be added to the asset pipeline and available for you to use. If it's not already in `app/assets/javascripts/application.js` by default, add these lines:
 
-`//= require parse`
+	//= require parse
