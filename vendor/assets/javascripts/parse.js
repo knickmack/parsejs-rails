@@ -1,7 +1,7 @@
 /*!
  * Parse JavaScript SDK
- * Version: 1.2.0
- * Built: Mon Jan 28 2013 18:16:47
+ * Version: 1.2.1
+ * Built: Mon Feb 11 2013 18:54:22
  * http://parse.com
  *
  * Copyright 2013 Parse, Inc.
@@ -13,7 +13,7 @@
  */
 (function(root) {
   root.Parse = root.Parse || {};
-  root.Parse.VERSION = "js1.2.0";
+  root.Parse.VERSION = "js1.2.1";
 }(this));
 
 
@@ -1267,6 +1267,7 @@
   };
 
   Parse._ajaxIE8 = function(method, url, data, success, error) {
+    var promise = new Parse.Promise();
     var xdr = new XDomainRequest();
     xdr.onload = function() {
       var response;
@@ -1276,19 +1277,25 @@
         if (error) {
           error(xdr);
         }
+        promise.reject(e);
       }
       if (response) {
         if (success) {
           success(response, xdr);
         }
+        promise.resolve(response);
       }
     };
     xdr.onerror = xdr.ontimeout = function() {
-      error(xdr);
+      if (error) {
+        error(xdr);
+      }
+      promise.reject(xdr);
     };
     xdr.onprogress = function() {};
     xdr.open(method, url);
     xdr.send(data);
+    return promise;
   };
 
   Parse._ajax = function(method, url, data, success, error) {
@@ -1296,6 +1303,7 @@
       return Parse._ajaxIE8(method, url, data, success, error);
     }
 
+    var promise = new Parse.Promise();
     var handled = false;
 
     var xhr = new Parse.XMLHttpRequest();
@@ -1314,22 +1322,26 @@
             if (error) {
               error(xhr);
             }
+            promise.reject(e);
           }
           if (response) {
             if (success) {
-              success(response, xhr);
+              success(response, xhr.status, xhr);
             }
+            promise.resolve(response, xhr.status, xhr);
           }
         } else {
           if (error) {
             error(xhr);
           }
+          promise.reject(xhr);
         }
       }
     };
     xhr.open(method, url, true);
     xhr.setRequestHeader("Content-Type", "text/plain");  // avoid pre-flight.
     xhr.send(data);
+    return promise;
   };
 
   // A self-propagating extend function.
@@ -1358,14 +1370,14 @@
     }
 
     
-    if (route !== "classes" &&
-        route !== "push" &&
-        route !== "users" &&
-        route !== "login" &&
+    if (route !== "batch" &&
+        route !== "classes" &&
         route !== "functions" &&
-        route !== "requestPasswordReset") {
-      throw "First argument must be one of classes, users, functions, or " +
-            "login, not '" + route + "'.";
+        route !== "login" &&
+        route !== "push" &&
+        route !== "requestPasswordReset" &&
+        route !== "users") {
+      throw "Bad route: '" + route + "'.";
     }
 
     var url = Parse.serverURL;
@@ -1401,7 +1413,8 @@
     }
     var data = JSON.stringify(dataObject);
 
-    Parse._ajax(method, url, data, options.success, options.error);
+    options = options || {};
+    return Parse._ajax(method, url, data, options.success, options.error);
   };
 
   // Helper function to get a value from a Backbone object as a property
@@ -3157,7 +3170,7 @@
      * promise will succeed, with the result being an array with the results of
      * all the input promises.
      * @param {Array} promises a list of promises to wait for.
-     * @return {Parse.Promise} the new promise
+     * @return {Parse.Promise} the new promise.
      */
     when: function(promises) {
       // Allow passing in Promises as separate arguments instead of an Array.
@@ -3209,6 +3222,22 @@
       });
 
       return promise;
+    },
+
+    /**
+     * Runs the given asyncFunction repeatedly, as long as the predicate
+     * function returns a truthy value. Stops repeating if asyncFunction returns
+     * a rejected promise.
+     * @param {Function} predicate should return false when ready to stop.
+     * @param {Function} asyncFunction should return a Promise.
+     */
+    _continueWhile: function(predicate, asyncFunction) {
+      if (predicate()) {
+        return asyncFunction().then(function() {
+          return Parse.Promise._continueWhile(predicate, asyncFunction);
+        });
+      }
+      return Parse.Promise.as();
     }
   });
 
@@ -3229,6 +3258,8 @@
       _.each(this._resolvedCallbacks, function(resolvedCallback) {
         resolvedCallback.apply(this, results);
       });
+      this._resolvedCallbacks = [];
+      this._rejectedCallbacks = [];
     },
 
     /**
@@ -3245,6 +3276,8 @@
       _.each(this._rejectedCallbacks, function(rejectedCallback) {
         rejectedCallback(error);
       });
+      this._resolvedCallbacks = [];
+      this._rejectedCallbacks = [];
     },
 
     /**
@@ -3315,7 +3348,66 @@
       }
 
       return promise;
+    },
+
+    /**
+     * Run the given callbacks after this promise is fulfilled.
+     * @param optionsOrCallback {} A Backbone-style options callback, or a
+     * callback function. If this is an options object and contains a "model"
+     * attributes, that will be passed to error callbacks as the first argument.
+     * @return {Parse.Promise} A promise that will be resolved after the
+     * callbacks are run, with the same result as this.
+     */
+    _thenRunCallbacks: function(optionsOrCallback) {
+      var options;
+      if (_.isFunction(optionsOrCallback)) {
+        var callback = optionsOrCallback;
+        options = {
+          success: function(result) {
+            callback(result, null);
+          },
+          error: function(error) {
+            callback(null, error);
+          }
+        };
+      } else {
+        options = _.clone(optionsOrCallback);
+      }
+      options = options || {};
+
+      return this.then(function(result) {
+        if (options.success) {
+          options.success(result);
+        }
+        return result;
+      }, function(error) {
+        if (options.error) {
+          if (options.model) {
+            options.error(options.model, error);
+          } else {
+            options.error(error);
+          }
+        }
+        return Parse.Promise.error(error);
+      });
+    },
+
+    /**
+     * Adds a callback function that should be called regardless of whether
+     * this promise failed or succeeded. The callback will be given either the
+     * array of results for its first argument, or the error as its second,
+     * depending on whether this Promise was rejected or resolved. Returns a
+     * new Promise, like "then" would.
+     * @param {Function} continuation the callback.
+     */
+    _continueWith: function(continuation) {
+      return this.then(function() {
+        return continuation(arguments, null);
+      }, function(error) {
+        return continuation(null, error);
+      });
     }
+
   });
 
 }(this));
@@ -3400,52 +3492,6 @@
    */
 
   /**
-   * Internal function for saveAll.  This calls func on every item in list,
-   * and adds the results to results.  When it's done, optionsOrCallback is
-   * called with the accumulated results.  See saveAll for more info.
-   *
-   * @param list - A list of Parse.Object.
-   * @param func - function(Parse.Object, callback);
-   * @param optionsOrCallback - See saveAll.
-   */
-  var _doAll = function(list, func, optionsOrCallback) {
-    var options;
-    if (_.isFunction(optionsOrCallback)) {
-      var callback = optionsOrCallback;
-      options = {
-        success: function(list) { callback(list, null); },
-        error: function(e) { callback(null, e); }
-      };
-    } else {
-      options = optionsOrCallback;
-    }
-    options = options || {};
-
-    var results = [];
-    var promise = new Parse.Promise.as();
-    _.each(list, function(item) {
-      promise = promise.then(function() {
-        return func(item);
-      }).then(function(result) {
-        results.push(result);
-      });
-    });
-
-    promise = promise.then(function() {
-      if (options.success) {
-        options.success(results);
-      }
-    }, function(error) {
-      if (options.error) {
-        options.error(error);
-      }
-      return Parse.Promise.error(error);
-    });
-
-    return promise;
-  };
-
-  /**
    * Saves the given list of Parse.Object.
    * If any error is encountered, stops and calls the error handler.
    * There are two ways you can call this function.
@@ -3471,18 +3517,10 @@
    * </pre>
    *
    * @param {Array} list A list of <code>Parse.Object</code>.
-   * @param {Object} optionsOrCallback A Backbone-style callback object.
+   * @param {Object} options A Backbone-style callback object.
    */
-  Parse.Object.saveAll = function(list, optionsOrCallback) {
-    return _doAll(list, function(obj, options) {
-      return obj.save(null, options);
-    }, optionsOrCallback);
-  };
-
-  Parse.Object._signUpAll = function(list, optionsOrCallback) {
-    return _doAll(list, function(obj, options) {
-      return obj.signUp(null, options);
-    }, optionsOrCallback);
+  Parse.Object.saveAll = function(list, options) {
+    return Parse.Object._deepSaveAsync(list)._thenRunCallbacks(options);
   };
 
   // Attach all inheritable methods to the Parse.Object prototype.
@@ -3677,20 +3715,6 @@
     },
 
     /**
-     * If any save has been started since the current one running, process the
-     * next one in the queue.
-     */
-    _processSaveQueue: function() {
-      if (this._saveQueue && this._saveQueue.length > 0) {
-        var nextSave = _.first(this._saveQueue);
-        this._saveQueue = _.rest(this._saveQueue);
-        nextSave();
-      } else {
-        this._saving = false;
-      }
-    },
-
-    /**
      * Called when a save fails because of an error. Any changes that were part
      * of the save need to be merged with changes made after the save. This
      * might throw an exception is you do conflicting operations. For example,
@@ -3716,7 +3740,7 @@
           nextChanges[key] = op1;
         }
       });
-      this._processSaveQueue();
+      this._saving = this._saving - 1;
     },
 
     /**
@@ -3734,7 +3758,7 @@
         self._serverData[key] = Parse._decode(key, value);
       });
       this._rebuildAllEstimatedData();
-      this._processSaveQueue();
+      this._saving = this._saving - 1;
     },
 
     /**
@@ -4079,6 +4103,13 @@
     },
 
     /**
+     * Returns true if this object can be serialized for saving.
+     */
+    _canBeSerialized: function() {
+      return Parse.Object._canBeSerializedAsValue(this.attributes);
+    },
+
+    /**
      * Fetch the model from the server. If the server's representation of the
      * model differs from its current attributes, they will be overriden,
      * triggering a <code>"change"</code> event.
@@ -4200,9 +4231,12 @@
 
       // If there is any unsaved child, save it first.
       model._refreshCache();
+
+      
+
       var unsavedChildren = Parse.Object._findUnsavedChildren(model.attributes);
       if (unsavedChildren.length > 0) {
-        return Parse.Object.saveAll(unsavedChildren).then(function() {
+        return Parse.Object._deepSaveAsync(this.attributes).then(function() {
           return model.save(null, oldOptions);
         }, function(error) {
           if (options.error) {
@@ -4243,8 +4277,10 @@
                                                  newOptions);
 
       this._startSave();
+      this._saving = (this._saving || 0) + 1;
 
-      var doSave = function() {
+      this._allPreviousSaves = this._allPreviousSaves || Parse.Promise.as();
+      this._allPreviousSaves._continueWith(function() {
         var method = model.id ? 'PUT' : 'POST';
 
         var json = model._getSaveJSON();
@@ -4256,19 +4292,15 @@
           route = "users";
           className = null;
         }
-        Parse._request(route, className, model.id, method, json, newOptions);
+        var request =
+          Parse._request(route, className, model.id, method, json, newOptions);
         if (newOptions.wait) {
           model.set(current, setOptions);
         }
-      };
+        return request;
 
-      if (this._saving) {
-        this._saveQueue = this._saveQueue || [];
-        this._saveQueue.push(doSave);
-      } else {
-        this._saving = true;
-        doSave();
-      }
+      });
+      this._allPreviousSaves = promise;
 
       return promise;
     },
@@ -4333,7 +4365,7 @@
         output.updatedAt = output.createdAt;
       }
       if (status) {
-        this._existed = (status.status !== 201);
+        this._existed = (status !== 201);
       }
       return output;
     },
@@ -4687,6 +4719,125 @@
       });
     }
     return results;
+  };
+
+  Parse.Object._canBeSerializedAsValue = function(object) {
+    var canBeSerializedAsValue = true;
+
+    if (object instanceof Parse.Object) {
+      canBeSerializedAsValue = !!object.id;
+
+    } else if (_.isArray(object)) {
+      _.each(object, function(child) {
+        if (!Parse.Object._canBeSerializedAsValue(child)) {
+          canBeSerializedAsValue = false;
+        }
+      });
+
+    } else if (_.isObject(object)) {
+      Parse._each(object, function(child) {
+        if (!Parse.Object._canBeSerializedAsValue(child)) {
+          canBeSerializedAsValue = false;
+        }
+      });
+    }
+
+    return canBeSerializedAsValue;
+  };
+
+  Parse.Object._deepSaveAsync = function(object) {
+    var objects = _.uniq(Parse.Object._findUnsavedChildren(object));
+    var remaining = _.uniq(objects);
+
+    return Parse.Promise._continueWhile(function() {
+      return remaining.length > 0;
+    }, function() {
+
+      // Gather up all the objects that can be saved in this batch.
+      var batch = [];
+      var newRemaining = [];
+      _.each(remaining, function(object) {
+        // Limit batches to 20 objects.
+        if (batch.length > 20) {
+          newRemaining.push(object);
+          return;
+        }
+
+        if (object._canBeSerialized()) {
+          batch.push(object);
+        } else {
+          newRemaining.push(object);
+        }
+      });
+      remaining = newRemaining;
+
+      // If we can't save any objects, there must be a circular reference.
+      if (batch.length === 0) {
+        return Parse.Promise.error(
+          new Parse.Error(Parse.Error.OTHER_CAUSE,
+                          "Tried to save a batch with a cycle."));
+      }
+
+      // Reserve a spot in every object's save queue.
+      var readyToStart = Parse.Promise.when(_.map(batch, function(object) {
+        return object._allPreviousSaves || Parse.Promise.as();
+      }));
+      var batchFinished = new Parse.Promise();
+      _.each(batch, function(object) {
+        object._allPreviousSaves = batchFinished;
+      });
+
+      // Save a single batch, whether previous saves succeeded or failed.
+      return readyToStart._continueWith(function() {
+        return Parse._request("batch", null, null, "POST", {
+          requests: _.map(batch, function(object) {
+            var json = object._getSaveJSON();
+            var method = "POST";
+
+            var path = "/1/classes/" + object.className;
+            if (object.id) {
+              path = path + "/" + object.id;
+              method = "PUT";
+            }
+
+            object._startSave();
+
+            return {
+              method: method,
+              path: path,
+              body: json
+            };
+          })
+
+        }).then(function(response, status, xhr) {
+          var error;
+          _.each(batch, function(object, i) {
+            if (response[i].success) {
+              object._finishSave(
+                object.parse(response[i].success, status, xhr));
+            } else {
+              error = error || response[i].error;
+              object._cancelSave();
+            }
+          });
+          if (error) {
+            return Parse.Promise.error(
+              new Parse.Error(error.code, error.error));
+          }
+
+        }).then(function(results) {
+          batchFinished.resolve(results);
+          return results;
+        }, function(error) {
+          batchFinished.reject(error);
+          return Parse.Promise.error(error);
+
+        });
+      });
+    }).then(function() {
+      return object;
+
+    });
   };
 
 }(this));
@@ -6450,6 +6601,18 @@
      */
     notContainedIn: function(key, values) {
       this._addCondition(key, "$nin", values);
+      return this;
+    },
+
+    /**
+     * Add a constraint to the query that requires a particular key's value to
+     * contain each one of the provided list of values.
+     * @param {String} key The key to check.  This key's value must be an array.
+     * @param {Array} values The values that will match.
+     * @return {Parse.Query} Returns the query, so you can chain this call.
+     */
+    containsAll: function(key, values) {
+      this._addCondition(key, "$all", values);
       return this;
     },
 
