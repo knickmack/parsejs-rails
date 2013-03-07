@@ -1,7 +1,7 @@
 /*!
  * Parse JavaScript SDK
- * Version: 1.2.1
- * Built: Mon Feb 11 2013 18:54:22
+ * Version: 1.2.2
+ * Built: Tue Mar 05 2013 13:27:37
  * http://parse.com
  *
  * Copyright 2013 Parse, Inc.
@@ -13,7 +13,7 @@
  */
 (function(root) {
   root.Parse = root.Parse || {};
-  root.Parse.VERSION = "js1.2.1";
+  root.Parse.VERSION = "js1.2.2";
 }(this));
 
 
@@ -1536,6 +1536,46 @@
   };
 
   /**
+   * Does a deep traversal of every item in object, calling func on all
+   * instances of Parse.Object.
+   * @param {Object} object The object or array to traverse deeply.
+   * @param {Function} func The function to call for every Parse.Object. It will
+   *     be passed the Parse Object. If it returns a truthy value, that value
+   *     will replace the object in its parent container.
+   * @returns {} Undefined, unless object is a Parse.Object, in which case it
+   *     returns the result of calling func on that object.
+   */
+  Parse._traverse = function(object, func) {
+    if (object instanceof Parse.Object) {
+      Parse._traverse(object.attributes, func);
+      return func(object);
+    }
+    if (object instanceof Parse.Relation) {
+      // Nothing needs to be done, but we don't want to recurse into the
+      // relation's parent infinitely, so we catch this case.
+      return;
+    }
+    if (Parse._.isArray(object)) {
+      Parse._.each(object, function(child, index) {
+        var newChild = Parse._traverse(child, func);
+        if (newChild) {
+          object[index] = newChild;
+        }
+      });
+      return;
+    }
+    if (Parse._.isObject(object)) {
+      Parse._each(object, function(child, key) {
+        var newChild = Parse._traverse(child, func);
+        if (newChild) {
+          object[key] = newChild;
+        }
+      });
+      return;
+    }
+  };
+
+  /**
    * This is like _.each, except:
    * * it doesn't work for so-called array-like objects,
    * * it does work for dictionaries with a "length" attribute.
@@ -1584,8 +1624,8 @@
 
     /**
      * Error code indicating that something has gone wrong with the server.
-     * If you get this error code, it is Parse's fault. Email feedback@parse.com
-     * to criticize us.
+     * If you get this error code, it is Parse's fault. Contact us at 
+     * https://parse.com/help
      * @constant
      */
     INTERNAL_SERVER_ERROR: 1,
@@ -3749,6 +3789,17 @@
      * sent directly from the server.
      */
     _finishSave: function(serverData) {
+      // Grab a copy of any object referenced by this object. These instances
+      // may have already been fetched, and we don't want to lose their data.
+      // Note that doing it like this means we will unify separate copies of the
+      // same object, but that's a risk we have to take.
+      var fetchedObjects = {};
+      Parse._traverse(this.attributes, function(object) {
+        if (object.id && object._hasData) {
+          fetchedObjects[object.id] = object;
+        }
+      });
+
       var savedChanges = _.first(this._opSetQueue);
       this._opSetQueue = _.rest(this._opSetQueue);
       this._applyOpSet(savedChanges, this._serverData);
@@ -3756,6 +3807,17 @@
       var self = this;
       Parse._each(serverData, function(value, key) {
         self._serverData[key] = Parse._decode(key, value);
+
+        // Look for any objects that might have become unfetched and fix them
+        // by replacing their values with the previously observed values.
+        var fetched = Parse._traverse(self._serverData[key], function(object) {
+          if (fetchedObjects[object.id]) {
+            return fetchedObjects[object.id];
+          }
+        });
+        if (fetched) {
+          self._serverData[key] = fetched;
+        }
       });
       this._rebuildAllEstimatedData();
       this._saving = this._saving - 1;
@@ -4698,26 +4760,12 @@
 
   Parse.Object._findUnsavedChildren = function(object) {
     var results = [];
-    if (object instanceof Parse.Object) {
+    Parse._traverse(object, function(object) {
       object._refreshCache();
       if (object.dirty()) {
-        results = [object];
+        results.push(object);
       }
-      results.push.apply(results,
-                         Parse.Object._findUnsavedChildren(object.attributes));
-    } else if (object instanceof Parse.Relation) {
-      // Nothing needs to be done, but we don't want to recurse into the
-      // relation's parent infinitely, so we catch this case.
-      var unused = null;
-    } else if (_.isArray(object)) {
-      _.each(object, function(child) {
-        results.push.apply(results, Parse.Object._findUnsavedChildren(child));
-      });
-    } else if (_.isObject(object)) {
-      Parse._each(object, function(child) {
-        results.push.apply(results, Parse.Object._findUnsavedChildren(child));
-      });
-    }
+    });
     return results;
   };
 
@@ -6487,7 +6535,8 @@
     },
 
     /**
-     * Sets the limit of the number of results to return.
+     * Sets the limit of the number of results to return. The default limit is
+     * 100, with a maximum of 1000 results being returned at a time.
      * @param {Number} n the number of results to limit to.
      * @return {Parse.Query} Returns the query, so you can chain this call.
      */
