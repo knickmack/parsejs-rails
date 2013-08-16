@@ -9,10 +9,10 @@ Gem::Specification.new do |gem|
   gem.authors       = ["Nik Macintosh"]
   gem.email         = ["me@knickmack.com"]
   gem.homepage      = "https://github.com/knickmack/parsejs-rails"
-  gem.summary       = "Use the Parse Javascript SDK with Rails 3"
-  gem.description   = "This gem provides the Parse Javascript SDK as an asset to your Rails 3 application."
+  gem.summary       = "Use the Parse Javascript SDK with Rails"
+  gem.description   = "This gem provides the Parse Javascript SDK as an asset to your Rails application."
 
-  gem.add_dependency "railties", "~> 3.1"
+  gem.add_dependency "railties", ">= 3.1"
 
   gem.files         = Dir["{lib,vendor}/**/*"] + ["LICENSE", "README.md"]
   gem.require_path = "lib"

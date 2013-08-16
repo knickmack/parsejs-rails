@@ -1,5 +1,5 @@
 module Parsejs
   module Rails
-    VERSION = "1.2.7.0"
+    VERSION = "1.2.9.0"
   end
 end

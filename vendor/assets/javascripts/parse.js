@@ -1,7 +1,7 @@
 /*!
  * Parse JavaScript SDK
- * Version: 1.2.7
- * Built: Wed Apr 17 2013 14:48:27
+ * Version: 1.2.9
+ * Built: Tue Aug 13 2013 17:31:35
  * http://parse.com
  *
  * Copyright 2013 Parse, Inc.
@@ -13,7 +13,7 @@
  */
 (function(root) {
   root.Parse = root.Parse || {};
-  root.Parse.VERSION = "js1.2.7";
+  root.Parse.VERSION = "js1.2.9";
 }(this));
 //     Underscore.js 1.4.4
 //     http://underscorejs.org
@@ -1638,7 +1638,7 @@
    * if seenObjects is falsey. Otherwise any Parse.Objects not in
    * seenObjects will be fully embedded rather than encoded
    * as a pointer.  This array will be used to prevent going into an infinite
-   * loop because we have circular references.  If <seenObjects>
+   * loop because we have circular references.  If seenObjects
    * is set, then none of the Parse Objects that are serialized can be dirty.
    */
   Parse._encode = function(value, seenObjects, disallowObjects) {
@@ -1794,9 +1794,9 @@
       Parse._traverse(object.attributes, func, seen);
       return func(object);
     }
-    if (object instanceof Parse.Relation) {
+    if (object instanceof Parse.Relation || object instanceof Parse.File) {
       // Nothing needs to be done, but we don't want to recurse into the
-      // relation's parent infinitely, so we catch this case.
+      // object's parent infinitely, so we catch this case.
       return func(object);
     }
     if (Parse._.isArray(object)) {
@@ -2175,7 +2175,15 @@
      * Twitter) is unsupported.
      * @constant
      */
-    UNSUPPORTED_SERVICE: 252
+    UNSUPPORTED_SERVICE: 252,
+
+    /**
+     * Error code indicating that there were multiple errors. Aggregate errors
+     * have an "errors" property, which is an array of error objects with more
+     * detail about each error that occurred.
+     * @constant
+     */
+    AGGREGATE_ERROR: 600
   });
 
 }(this));
@@ -3054,8 +3062,7 @@
       } else if (previous instanceof Parse.Op.Set) {
         return new Parse.Op.Set(this._estimate(previous.value()));
       } else if (previous instanceof Parse.Op.AddUnique) {
-        return new Parse.Op.AddUnique(
-          _.union(previous.objects(), this.objects()));
+        return new Parse.Op.AddUnique(this._estimate(previous.objects()));
       } else {
         throw "Op is invalid after previous op.";
       }
@@ -3065,7 +3072,26 @@
       if (!oldValue) {
         return _.clone(this.objects());
       } else {
-        return oldValue.concat(_.difference(this.objects(), oldValue));
+        // We can't just take the _.uniq(_.union(...)) of oldValue and
+        // this.objects, because the uniqueness may not apply to oldValue
+        // (especially if the oldValue was set via .set())
+        var newValue = _.clone(oldValue);
+        Parse._arrayEach(this.objects(), function(obj) {
+          if (obj instanceof Parse.Object && obj.id) {
+            var matchingObj = _.find(newValue, function(anObj) {
+              return (anObj instanceof Parse.Object) && (anObj.id === obj.id);
+            });
+            if (!matchingObj) {
+              newValue.push(obj);
+            } else {
+              var index = _.indexOf(newValue, matchingObj);
+              newValue[index] = obj;
+            }
+          } else if (!_.contains(newValue, obj)) {
+            newValue.push(obj);
+          }
+        });
+        return newValue;
       }
     }
   });
@@ -3398,7 +3424,7 @@
    * called when the async task is fulfilled.
    *
    * <p>Typical usage would be like:<pre>
-   *    query.findAsync().then(function(results) {
+   *    query.find().then(function(results) {
    *      results[0].set("foo", "bar");
    *      return results[0].saveAsync();
    *    }).then(function(result) {
@@ -3991,6 +4017,7 @@
   /**
    * A Parse.File is a local representation of a file that is saved to the Parse
    * cloud.
+   * @class
    * @param name {String} The file's name. This will change to a unique value
    *     once the file has finished saving.
    * @param data {Array} The data for the file, as either:
@@ -4191,6 +4218,147 @@
    */
   Parse.Object.saveAll = function(list, options) {
     return Parse.Object._deepSaveAsync(list)._thenRunCallbacks(options);
+  };
+
+/**
+   * Destroy the given list of models on the server if it was already persisted.
+   * Optimistically removes each model from its collection, if it has one.
+   * If `wait: true` is passed, waits for the server to respond before removal.
+   *
+   * <p>Unlike saveAll, if an error occurs while deleting an individual model,
+   * this method will continue trying to delete the rest of the models if
+   * possible, except in the case of a fatal error like a connection error.
+   *
+   * <p>In particular, the Parse.Error object returned in the case of error may
+   * be one of two types:
+   *
+   * <ul>
+   *   <li>A Parse.Error.AGGREGATE_ERROR. This object's "errors" property is an
+   *       array of other Parse.Error objects. Each error object in this array
+   *       has an "object" property that references the object that could not be
+   *       deleted (for instance, because that object could not be found).</li>
+   *   <li>A non-aggregate Parse.Error. This indicates a serious error that 
+   *       caused the delete operation to be aborted partway through (for 
+   *       instance, a connection failure in the middle of the delete).</li>
+   * </ul>
+   *
+   * <p>There are two ways you can call this function.
+   * 
+   * The Backbone way:<pre>
+   *   Parse.Object.destroyAll([object1, object2, ...], {
+   *     success: function() {
+   *       // All the objects were deleted.
+   *     },
+   *     error: function(error) {
+   *       // An error occurred while deleting one or more of the objects.
+   *       // If this is an aggregate error, then we can inspect each error
+   *       // object individually to determine the reason why a particular
+   *       // object was not deleted.
+   *       if (error.code == Parse.Error.AGGREGATE_ERROR) {
+   *         for (var i = 0; i < error.errors.length; i++) {
+   *           console.log("Couldn't delete " + error.errors[i].object.id + 
+   *             "due to " + error.errors[i].message);
+   *         }
+   *       } else {
+   *         console.log("Delete aborted because of " + error.message);
+   *       }
+   *     },
+   *   });
+   * </pre>
+   * A simplified syntax:<pre>
+   *   Parse.Object.destroyAll([obj1, obj2, ...], function(success, error) {
+   *     if (success) {
+   *       // All the objects were saved.
+   *     } else {
+   *       // An error occurred while deleting one or more of the objects.
+   *       // If this is an aggregate error, then we can inspect each error
+   *       // object individually to determine the reason why a particular
+   *       // object was not deleted.
+   *       if (error.code == Parse.Error.AGGREGATE_ERROR) {
+   *         for (var i = 0; i < error.errors.length; i++) {
+   *           console.log("Couldn't delete " + error.errors[i].object.id + 
+   *             "due to " + error.errors[i].message);
+   *         }
+   *       } else {
+   *         console.log("Delete aborted because of " + error.message);
+   *       }
+   *     }
+   *   });
+   * </pre>
+   *
+   * @param {Array} list A list of <code>Parse.Object</code>.
+   * @param {Object} options A Backbone-style callback object.
+   */
+  Parse.Object.destroyAll = function(list, options) {
+    var promise = Parse.Promise.as();
+    var batch = [];
+    var errors = [];
+
+    var triggerDestroy = function(object) {
+      object.trigger('destroy', object, object.collection, options);
+    };
+
+    var destroyBatch = function(batch) {
+      var promise = Parse.Promise.as();
+
+      if (batch.length > 0) {
+        promise = promise.then(function() {
+          return Parse._request("batch", null, null, "POST", {
+            requests: _.map(batch, function(object) {
+              return {
+                method: "DELETE",
+                path: "/1/classes/" + object.className + "/" + object.id
+              };
+            })
+          });
+        }).then(function(responses, status, xhr) {
+          Parse._arrayEach(batch, function(object, i) {
+            if (responses[i].success && options.wait) {
+              triggerDestroy(object);
+            } else if (responses[i].error) {
+              var error = new Parse.Error(responses[i].error.code,
+                                          responses[i].error.error);
+              error.object = object;
+
+              errors.push(error);
+            }
+          });
+        });
+      }
+
+      return promise;
+    };
+
+    Parse._arrayEach(list, function(object, i) {
+      if (!object.id || !options.wait) {
+        triggerDestroy(object);
+      }
+
+      if (object.id) {
+        batch.push(object);
+      }
+
+      if (batch.length === 20 || i+1 === list.length) {
+        var thisBatch = batch;
+        batch = [];
+
+        promise = promise.then(function() {
+          return destroyBatch(thisBatch);
+        });
+      }
+    });
+
+    return promise.then(function() {
+      if (errors.length === 0) {
+        return true;
+      } else {
+        var error = new Parse.Error(Parse.Error.AGGREGATE_ERROR,
+                                    "Error deleting an object in destroyAll");
+        error.errors = errors;
+
+        return Parse.Promise.error(error);
+      }
+    })._thenRunCallbacks(options);
   };
 
   // Attach all inheritable methods to the Parse.Object prototype.
@@ -4813,6 +4981,12 @@
      * Fetch the model from the server. If the server's representation of the
      * model differs from its current attributes, they will be overriden,
      * triggering a <code>"change"</code> event.
+     *
+     * @param {Object} options A Backbone-style callback object.
+     * Valid options are:<ul>
+     *   <li>success: A Backbone-style success callback.
+     *   <li>error: An Backbone-style error callback.
+     * </ul>
      * @return {Parse.Promise} A promise that is fulfilled when the fetch
      *     completes.
      */
@@ -4859,6 +5033,14 @@
      *     // The save failed.  Error is an instance of Parse.Error.
      *   });</pre>
      * 
+     * @param {Object} options A Backbone-style callback object.
+     * Valid options are:<ul>
+     *   <li>wait: Set to true to wait for the server to confirm a successful
+     *   save before modifying the attributes on the object.
+     *   <li>silent: Set to true to avoid firing the `set` event.
+     *   <li>success: A Backbone-style success callback.
+     *   <li>error: An Backbone-style error callback.
+     * </ul>
      * @return {Parse.Promise} A promise that is fulfilled when the save
      *     completes.
      * @see Parse.Error
@@ -4978,6 +5160,13 @@
      * If `wait: true` is passed, waits for the server to respond
      * before removal.
      *
+     * @param {Object} options A Backbone-style callback object.
+     * Valid options are:<ul>
+     *   <li>wait: Set to true to wait for the server to confirm successful
+     *   deletion of the object before triggering the `destroy` event.
+     *   <li>success: A Backbone-style success callback
+     *   <li>error: An Backbone-style error callback.
+     * </ul>
      * @return {Parse.Promise} A promise that is fulfilled when the destroy
      *     completes.
      */
@@ -5347,18 +5536,23 @@
   };
 
   Parse.Object._canBeSerializedAsValue = function(object) {
+    
+    if (object instanceof Parse.Object) {
+      return !!object.id;
+    }
+    if (object instanceof Parse.File) {
+      // Don't recurse indefinitely into files.
+      return true;
+    }
+
     var canBeSerializedAsValue = true;
 
-    if (object instanceof Parse.Object) {
-      canBeSerializedAsValue = !!object.id;
-
-    } else if (_.isArray(object)) {
+    if (_.isArray(object)) {
       Parse._arrayEach(object, function(child) {
         if (!Parse.Object._canBeSerializedAsValue(child)) {
           canBeSerializedAsValue = false;
         }
       });
-
     } else if (_.isObject(object)) {
       Parse._objectEach(object, function(child) {
         if (!Parse.Object._canBeSerializedAsValue(child)) {
@@ -5366,7 +5560,6 @@
         }
       });
     }
-
     return canBeSerializedAsValue;
   };
 
@@ -5679,6 +5872,15 @@
     /**
      * Add a model, or list of models to the set. Pass **silent** to avoid
      * firing the `add` event for every new model.
+     *
+     * @param {Array} models An array of instances of <code>Parse.Object</code>.
+     *
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are:<ul>
+     *   <li>at: The index at which to add the models.
+     *   <li>silent: Set to true to avoid firing the `add` event for every new
+     *   model.
+     * </ul>
      */
     add: function(models, options) {
       var i, index, length, model, cid, id, cids = {}, ids = {};
@@ -5742,6 +5944,13 @@
     /**
      * Remove a model, or a list of models from the set. Pass silent to avoid
      * firing the <code>remove</code> event for every model removed.
+     *
+     * @param {Array} models The model or list of models to remove from the
+     *   collection.
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are: <ul>
+     *   <li>silent: Set to true to avoid firing the `remove` event.
+     * </ul>
      */
     remove: function(models, options) {
       var i, l, index, model;
@@ -5768,6 +5977,8 @@
 
     /**
      * Gets a model from the set by id.
+     * @param {String} id The Parse objectId identifying the Parse.Object to
+     * fetch from this collection.
      */
     get: function(id) {
       return id && this._byId[id.id || id];
@@ -5775,6 +5986,8 @@
 
     /**
      * Gets a model from the set by client id.
+     * @param {} cid The Backbone collection id identifying the Parse.Object to
+     * fetch from this collection.
      */
     getByCid: function(cid) {
       return cid && this._byCid[cid.cid || cid];
@@ -5782,6 +5995,8 @@
 
     /**
      * Gets the model at the given index.
+     *
+     * @param {Number} index The index of the model to return.
      */
     at: function(index) {
       return this.models[index];
@@ -5791,6 +6006,10 @@
      * Forces the collection to re-sort itself. You don't need to call this
      * under normal circumstances, as the set will maintain sort order as each
      * item is added.
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are: <ul>
+     *   <li>silent: Set to true to avoid firing the `reset` event.
+     * </ul>
      */
     sort: function(options) {
       options = options || {};
@@ -5811,6 +6030,8 @@
 
     /**
      * Plucks an attribute from each model in the collection.
+     * @param {String} attr The attribute to return from each model in the
+     * collection.
      */
     pluck: function(attr) {
       return _.map(this.models, function(model){ return model.get(attr); });
@@ -5820,6 +6041,13 @@
      * When you have more items than you want to add or remove individually,
      * you can reset the entire set with a new list of models, without firing
      * any `add` or `remove` events. Fires `reset` when finished.
+     *
+     * @param {Array} models The model or list of models to remove from the
+     *   collection.
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are: <ul>
+     *   <li>silent: Set to true to avoid firing the `reset` event.
+     * </ul>
      */
     reset: function(models, options) {
       var self = this;
@@ -5840,6 +6068,14 @@
      * Fetches the default set of models for this collection, resetting the
      * collection when they arrive. If `add: true` is passed, appends the
      * models to the collection instead of resetting.
+     *
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are:<ul>
+     *   <li>silent: Set to true to avoid firing `add` or `reset` events for
+     *   models fetched by this fetch.
+     *   <li>success: A Backbone-style success callback
+     *   <li>error: An Backbone-style error callback.
+     * </ul>
      */
     fetch: function(options) {
       options = _.clone(options) || {};
@@ -5862,6 +6098,17 @@
      * Creates a new instance of a model in this collection. Add the model to
      * the collection immediately, unless `wait: true` is passed, in which case
      * we wait for the server to agree.
+     *
+     * @param {Parse.Object} model The new model to create and add to the
+     *   collection.
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are:<ul>
+     *   <li>wait: Set to true to wait for the server to confirm creation of the
+     *   model before adding it to the collection.
+     *   <li>silent: Set to true to avoid firing an `add` event.
+     *   <li>success: A Backbone-style success callback
+     *   <li>error: An Backbone-style error callback.
+     * </ul>
      */
     create: function(model, options) {
       var coll = this;
@@ -6748,7 +6995,7 @@
         
         return null;
       }
-      Parse.User._currentUser = new Parse.Object._create("_User");
+      Parse.User._currentUser = Parse.Object._create("_User");
       Parse.User._currentUser._isCurrentUser = true;
 
       var json = JSON.parse(userData);
@@ -6792,7 +7039,7 @@
     },
 
     _logInWith: function(provider, options) {
-      var user = new Parse.User();
+      var user = Parse.Object._create("_User");
       return user._linkWith(provider, options);
     }
 
@@ -6911,8 +7158,12 @@
      * the server.  Either options.success or options.error is called when the
      * find completes.
      *
-     * @param {} objectId The id of the object to be fetched.
+     * @param {String} objectId The id of the object to be fetched.
      * @param {Object} options A Backbone-style options object.
+     * Valid options are:<ul>
+     *   <li>success: A Backbone-style success callback
+     *   <li>error: An Backbone-style error callback.
+     * </ul>
      */
     get: function(objectId, options) {
       var self = this;
@@ -6932,7 +7183,7 @@
 
     /**
      * Returns a JSON representation of this query.
-     * @return {Object}
+     * @return {Object} The JSON representation of the query.
      */
     toJSON: function() {
       var params = {
@@ -7041,6 +7292,14 @@
 
     /**
      * Returns a new instance of Parse.Collection backed by this query.
+     * @param {Array} items An array of instances of <code>Parse.Object</code>
+     *     with which to start this Collection.
+     * @param {Object} options An optional object with Backbone-style options.
+     * Valid options are:<ul>
+     *   <li>model: The Parse.Object subclass that this collection contains.
+     *   <li>query: An instance of Parse.Query to use when fetching items.
+     *   <li>comparator: A string property name or function to sort by.
+     * </ul>
      * @return {Parse.Collection}
      */
     collection: function(items, options) {
@@ -7408,7 +7667,8 @@
      * values near the point given and within the maximum distance given.
      * @param {String} key The key that the Parse.GeoPoint is stored in.
      * @param {Parse.GeoPoint} point The reference Parse.GeoPoint that is used.
-     * @param maxDistance Maximum distance (in radians) of results to return.
+     * @param {Number} maxDistance Maximum distance (in radians) of results to
+     *   return.
      * @return {Parse.Query} Returns the query, so you can chain this call.
      */
     withinRadians: function(key, point, distance) {
@@ -7512,9 +7772,9 @@
      * promise, then iteration will stop with that error. The items are
      * processed in an unspecified order. The query may not have any sort order,
      * and may not use limit or skip.
-     * @param callback {Function} Callback that will be called with each result
+     * @param {Function} callback Callback that will be called with each result
      *     of the query.
-     * @param options {Object} An optional Backbone-like options object with
+     * @param {Object} options An optional Backbone-like options object with
      *     success and error callbacks that will be invoked once the iteration
      *     has finished.
      * @return {Parse.Promise} A promise that will be fulfilled once the
