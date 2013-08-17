@@ -11,6 +11,7 @@ Gem::Specification.new do |gem|
   gem.homepage      = "https://github.com/knickmack/parsejs-rails"
   gem.summary       = "Use the Parse Javascript SDK with Rails"
   gem.description   = "This gem provides the Parse Javascript SDK as an asset to your Rails application."
+  gem.license       = "MIT"
 
   gem.add_dependency "railties", ">= 3.1"
 
