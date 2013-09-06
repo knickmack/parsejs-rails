@@ -1,7 +1,7 @@
 /*!
  * Parse JavaScript SDK
- * Version: 1.2.9
- * Built: Tue Aug 13 2013 17:31:35
+ * Version: 1.2.10
+ * Built: Tue Sep 03 2013 14:38:42
  * http://parse.com
  *
  * Copyright 2013 Parse, Inc.
@@ -13,7 +13,7 @@
  */
 (function(root) {
   root.Parse = root.Parse || {};
-  root.Parse.VERSION = "js1.2.9";
+  root.Parse.VERSION = "js1.2.10";
 }(this));
 //     Underscore.js 1.4.4
 //     http://underscorejs.org
@@ -1541,30 +1541,41 @@
   };
 
   /**
-   * route is classes, users, login, etc.
-   * objectId is null if there is no associated objectId.
-   * method is the http method for the REST API.
-   * dataObject is the payload as an object, or null if there is none.
+   * Options:
+   *   route: is classes, users, login, etc.
+   *   objectId: null if there is no associated objectId.
+   *   method: the http method for the REST API.
+   *   dataObject: the payload as an object, or null if there is none.
+   *   useMasterKey: overrides whether to use the master key if set.
    * @ignore
    */
-  Parse._request = function(route, className, objectId, method, dataObject) {
+  Parse._request = function(options) {
+    var route = options.route;
+    var className = options.className;
+    var objectId = options.objectId;
+    var method = options.method;
+    var useMasterKey = options.useMasterKey;
+    var dataObject = options.data;
+
     if (!Parse.applicationId) {
-      throw "You must specify your applicationId using Parse.initialize";
+      throw "You must specify your applicationId using Parse.initialize.";
     }
 
     if (!Parse.javaScriptKey && !Parse.masterKey) {
-      throw "You must specify a key using Parse.initialize";
+      throw "You must specify a key using Parse.initialize.";
     }
 
     
     if (route !== "batch" &&
         route !== "classes" &&
+        route !== "events" &&
         route !== "files" &&
         route !== "functions" &&
         route !== "login" &&
         route !== "push" &&
         route !== "requestPasswordReset" &&
-        route !== "users") {
+        route !== "users" &&
+        route !== "jobs") {
       throw "Bad route: '" + route + "'.";
     }
 
@@ -1586,8 +1597,12 @@
       method = "POST";
     }
 
+    if (Parse._.isUndefined(useMasterKey)) {
+      useMasterKey = Parse._useMasterKey;
+    }
+
     dataObject._ApplicationId = Parse.applicationId;
-    if (!Parse._useMasterKey) {
+    if (!useMasterKey) {
       dataObject._JavaScriptKey = Parse.javaScriptKey;
     } else {
       dataObject._MasterKey = Parse.masterKey;
@@ -1840,6 +1855,67 @@
   Parse._isNullOrUndefined = function(x) {
     return Parse._.isNull(x) || Parse._.isUndefined(x);
   };
+}(this));
+
+(function(root) {
+  root.Parse = root.Parse || {};
+  var Parse = root.Parse;
+  var _ = Parse._;
+
+  /**
+   * @namespace Provides an interface to Parse's logging and analytics backend.
+   */
+  Parse.Analytics = Parse.Analytics || {};
+
+  _.extend(Parse.Analytics, {
+    /**
+     * Tracks the occurrence of a custom event with additional dimensions.
+     * Parse will store a data point at the time of invocation with the given
+     * event name.
+     *
+     * Dimensions will allow segmentation of the occurrences of this custom
+     * event. Keys and values should be {@code String}s, and will throw
+     * otherwise.
+     *
+     * To track a user signup along with additional metadata, consider the
+     * following:
+     * <pre>
+     * var dimensions = {
+     *  gender: 'm',
+     *  source: 'web',
+     *  dayType: 'weekend'
+     * };
+     * Parse.Analytics.track('signup', dimensions);
+     * </pre>
+     *
+     * There is a default limit of 4 dimensions per event tracked.
+     *
+     * @param {String} name The name of the custom event to report to Parse as
+     * having happened.
+     * @param {Object} dimensions The dictionary of information by which to
+     * segment this event.
+     * @return {Parse.Promise} A promise that is resolved when the round-trip
+     * to the server completes.
+     */
+    track: function(name, dimensions) {
+      if (!name || name.trim().length === 0) {
+        throw 'A name for the custom event must be provided';
+      }
+
+      _.each(dimensions, function(val, key) {
+        if (!_.isString(key) || !_.isString(val)) {
+          throw 'track() dimensions expects keys and values of type "string".';
+        }
+      });
+
+      return Parse._request({
+        route: 'events',
+        className: name,
+        method: 'POST',
+        data: dimensions
+      });
+    }
+  });
 }(this));
 
 (function(root) {
@@ -4088,6 +4164,8 @@
      * @return {Parse.Promise} Promise that is resolved when the save finishes.
      */
     save: function(options) {
+      options= options || {};
+
       var self = this;
       if (!self._previousSave) {
         self._previousSave = self._source.then(function(base64, type) {
@@ -4095,7 +4173,13 @@
             base64: base64,
             _ContentType: type
           };
-          return Parse._request("files", self._name, null, 'POST', data);
+          return Parse._request({
+            route: "files",
+            className: self._name,
+            method: 'POST',
+            data: data,
+            useMasterKey: options.useMasterKey
+          });
 
         }).then(function(response) {
           self._name = response.name;
@@ -4215,12 +4299,19 @@
    *
    * @param {Array} list A list of <code>Parse.Object</code>.
    * @param {Object} options A Backbone-style callback object.
+   * Valid options are:<ul>
+   *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+   *     be used for this request.
+   * </ul>
    */
   Parse.Object.saveAll = function(list, options) {
-    return Parse.Object._deepSaveAsync(list)._thenRunCallbacks(options);
+    options = options || {};
+    return Parse.Object._deepSaveAsync(list, {
+      useMasterKey: options.useMasterKey
+    })._thenRunCallbacks(options);
   };
 
-/**
+  /**
    * Destroy the given list of models on the server if it was already persisted.
    * Optimistically removes each model from its collection, if it has one.
    * If `wait: true` is passed, waits for the server to respond before removal.
@@ -4288,28 +4379,36 @@
    *
    * @param {Array} list A list of <code>Parse.Object</code>.
    * @param {Object} options A Backbone-style callback object.
+   * Valid options are:<ul>
+   *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+   *     be used for this request.
+   * </ul>
    */
   Parse.Object.destroyAll = function(list, options) {
-    var promise = Parse.Promise.as();
-    var batch = [];
-    var errors = [];
+    options = options || {};
 
     var triggerDestroy = function(object) {
       object.trigger('destroy', object, object.collection, options);
     };
 
+    var errors = [];
     var destroyBatch = function(batch) {
       var promise = Parse.Promise.as();
 
       if (batch.length > 0) {
         promise = promise.then(function() {
-          return Parse._request("batch", null, null, "POST", {
-            requests: _.map(batch, function(object) {
-              return {
-                method: "DELETE",
-                path: "/1/classes/" + object.className + "/" + object.id
-              };
-            })
+          return Parse._request({
+            route: "batch",
+            method: "POST",
+            useMasterKey: options.useMasterKey,
+            data: {
+              requests: _.map(batch, function(object) {
+                return {
+                  method: "DELETE",
+                  path: "/1/classes/" + object.className + "/" + object.id
+                };
+              })
+            }
           });
         }).then(function(responses, status, xhr) {
           Parse._arrayEach(batch, function(object, i) {
@@ -4329,6 +4428,8 @@
       return promise;
     };
 
+    var promise = Parse.Promise.as();
+    var batch = [];
     Parse._arrayEach(list, function(object, i) {
       if (!object.id || !options.wait) {
         triggerDestroy(object);
@@ -4986,13 +5087,22 @@
      * Valid options are:<ul>
      *   <li>success: A Backbone-style success callback.
      *   <li>error: An Backbone-style error callback.
+     *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+     *     be used for this request.
      * </ul>
      * @return {Parse.Promise} A promise that is fulfilled when the fetch
      *     completes.
      */
     fetch: function(options) {
       var self = this;
-      var request = Parse._request("classes", this.className, this.id, 'GET');
+      options = options || {};
+      var request = Parse._request({
+        method: 'GET',
+        route: "classes",
+        className: this.className,
+        objectId: this.id,
+        useMasterKey: options.useMasterKey
+      });
       return request.then(function(response, status, xhr) {
         self._finishFetch(self.parse(response, status, xhr), true);
         return self;
@@ -5040,6 +5150,8 @@
      *   <li>silent: Set to true to avoid firing the `set` event.
      *   <li>success: A Backbone-style success callback.
      *   <li>error: An Backbone-style error callback.
+     *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+     *     be used for this request.
      * </ul>
      * @return {Parse.Promise} A promise that is fulfilled when the save
      *     completes.
@@ -5107,7 +5219,9 @@
                                         unsavedChildren,
                                         unsavedFiles);
       if (unsavedChildren.length + unsavedFiles.length > 0) {
-        return Parse.Object._deepSaveAsync(this.attributes).then(function() {
+        return Parse.Object._deepSaveAsync(this.attributes, {
+          useMasterKey: options.useMasterKey
+        }).then(function() {
           return model.save(null, options);
         }, function(error) {
           return Parse.Promise.error(error)._thenRunCallbacks(options, model);
@@ -5130,7 +5244,14 @@
           route = "users";
           className = null;
         }
-        var request = Parse._request(route, className, model.id, method, json);
+        var request = Parse._request({
+          route: route,
+          className: className,
+          objectId: model.id,
+          method: method,
+          useMasterKey: options.useMasterKey,
+          data: json
+        });
 
         request = request.then(function(resp, status, xhr) {
           var serverAttrs = model.parse(resp, status, xhr);
@@ -5166,6 +5287,8 @@
      *   deletion of the object before triggering the `destroy` event.
      *   <li>success: A Backbone-style success callback
      *   <li>error: An Backbone-style error callback.
+     *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+     *     be used for this request.
      * </ul>
      * @return {Parse.Promise} A promise that is fulfilled when the destroy
      *     completes.
@@ -5186,8 +5309,13 @@
         triggerDestroy();
       }
 
-      var request =
-          Parse._request("classes", this.className, this.id, 'DELETE');
+      var request = Parse._request({
+        route: "classes",
+        className: this.className,
+        objectId: this.id,
+        method: 'DELETE',
+        useMasterKey: options.useMasterKey
+      });
       return request.then(function() {
         if (options.wait) {
           triggerDestroy();
@@ -5563,7 +5691,11 @@
     return canBeSerializedAsValue;
   };
 
-  Parse.Object._deepSaveAsync = function(object) {
+  /**
+   * @param {Object} object The root object.
+   * @param {Object} options: The only valid option is useMasterKey.
+   */
+  Parse.Object._deepSaveAsync = function(object, options) {
     var unsavedChildren = [];
     var unsavedFiles = [];
     Parse.Object._findUnsavedChildren(object, unsavedChildren, unsavedFiles);
@@ -5571,7 +5703,7 @@
     var promise = Parse.Promise.as();
     _.each(unsavedFiles, function(file) {
       promise = promise.then(function() {
-        return file.save();
+        return file.save(options);
       });
     });
 
@@ -5619,26 +5751,30 @@
 
         // Save a single batch, whether previous saves succeeded or failed.
         return readyToStart._continueWith(function() {
-          return Parse._request("batch", null, null, "POST", {
-            requests: _.map(batch, function(object) {
-              var json = object._getSaveJSON();
-              var method = "POST";
-
-              var path = "/1/classes/" + object.className;
-              if (object.id) {
-                path = path + "/" + object.id;
-                method = "PUT";
-              }
-
-              object._startSave();
-
-              return {
-                method: method,
-                path: path,
-                body: json
-              };
-            })
-
+          return Parse._request({
+            route: "batch",
+            method: "POST",
+            useMasterKey: options.useMasterKey,
+            data: {
+              requests: _.map(batch, function(object) {
+                var json = object._getSaveJSON();
+                var method = "POST";
+  
+                var path = "/1/classes/" + object.className;
+                if (object.id) {
+                  path = path + "/" + object.id;
+                  method = "PUT";
+                }
+  
+                object._startSave();
+  
+                return {
+                  method: method,
+                  path: path,
+                  body: json
+                };
+              })
+            }
           }).then(function(response, status, xhr) {
             var error;
             Parse._arrayEach(batch, function(object, i) {
@@ -6073,8 +6209,10 @@
      * Valid options are:<ul>
      *   <li>silent: Set to true to avoid firing `add` or `reset` events for
      *   models fetched by this fetch.
-     *   <li>success: A Backbone-style success callback
+     *   <li>success: A Backbone-style success callback.
      *   <li>error: An Backbone-style error callback.
+     *   <li>useMasterKey: In Cloud Code and Node only, uses the Master Key for
+     *       this request.
      * </ul>
      */
     fetch: function(options) {
@@ -6084,7 +6222,9 @@
       }
       var collection = this;
       var query = this.query || new Parse.Query(this.model);
-      return query.find().then(function(results) {
+      return query.find({
+        useMasterKey: options.useMasterKey
+      }).then(function(results) {
         if (options.add) {
           collection.add(results, options);
         } else {
@@ -6104,10 +6244,12 @@
      * @param {Object} options An optional object with Backbone-style options.
      * Valid options are:<ul>
      *   <li>wait: Set to true to wait for the server to confirm creation of the
-     *   model before adding it to the collection.
+     *       model before adding it to the collection.
      *   <li>silent: Set to true to avoid firing an `add` event.
-     *   <li>success: A Backbone-style success callback
+     *   <li>success: A Backbone-style success callback.
      *   <li>error: An Backbone-style error callback.
+     *   <li>useMasterKey: In Cloud Code and Node only, uses the Master Key for
+     *       this request.
      * </ul>
      */
     create: function(model, options) {
@@ -6757,7 +6899,13 @@
      */
     logIn: function(options) {
       var model = this;
-      var request = Parse._request("login", null, null, "GET", this.toJSON());
+      options = options || {};
+      var request = Parse._request({
+        route: "login",
+        method: "GET",
+        useMasterKey: options.useMasterKey,
+        data: this.toJSON()
+      });
       return request.then(function(resp, status, xhr) {
         var serverAttrs = model.parse(resp, status, xhr);
         model._finishFetch(serverAttrs);
@@ -6965,9 +7113,13 @@
      * @param {Object} options A Backbone-style options object.
      */
     requestPasswordReset: function(email, options) {
-      var json = { email: email };
-      var request = Parse._request("requestPasswordReset", null, null, "POST",
-                                   json);
+      options = options || {};
+      var request = Parse._request({
+        route: "requestPasswordReset",
+        method: "POST",
+        useMasterKey: options.useMasterKey,
+        data: { email: email }
+      });
       return request._thenRunCallbacks(options);
     },
 
@@ -7218,15 +7370,28 @@
      * Either options.success or options.error is called when the find
      * completes.
      *
-     * @param {Object} options A Backbone-style options object.
+     * @param {Object} options A Backbone-style options object. Valid options
+     * are:<ul>
+     *   <li>success: Function to call when the find completes successfully.
+     *   <li>error: Function to call when the find fails.
+     *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+     *     be used for this request.
+     * </ul>
+     *
      * @return {Parse.Promise} A promise that is resolved with the results when
      * the query completes.
      */
     find: function(options) {
       var self = this;
+      options = options || {};
 
-      var request = Parse._request("classes", this.className, null, "GET",
-                                   this.toJSON());
+      var request = Parse._request({
+        route: "classes",
+        className: this.className,
+        method: "GET",
+        useMasterKey: options.useMasterKey,
+        data: this.toJSON()
+      });
 
       return request.then(function(response) {
         return _.map(response.results, function(json) {
@@ -7247,16 +7412,31 @@
      * Either options.success or options.error is called when the count
      * completes.
      *
-     * @param {Object} options A Backbone-style options object.
+     * @param {Object} options A Backbone-style options object. Valid options
+     * are:<ul>
+     *   <li>success: Function to call when the count completes successfully.
+     *   <li>error: Function to call when the find fails.
+     *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+     *     be used for this request.
+     * </ul>
+     *
      * @return {Parse.Promise} A promise that is resolved with the count when
      * the query completes.
      */
     count: function(options) {
+      var self = this;
+      options = options || {};
+
       var params = this.toJSON();
       params.limit = 0;
       params.count = 1;
-      var request = Parse._request("classes", this.className, null, "GET",
-                                   params);
+      var request = Parse._request({
+        route: "classes",
+        className: self.className, 
+        method: "GET",
+        useMasterKey: options.useMasterKey,
+        data: params
+      });
 
       return request.then(function(response) {
         return response.count;
@@ -7269,17 +7449,30 @@
      * Either options.success or options.error is called when it completes.
      * success is passed the object if there is one. otherwise, undefined.
      *
-     * @param {Object} options A Backbone-style options object.
+     * @param {Object} options A Backbone-style options object. Valid options
+     * are:<ul>
+     *   <li>success: Function to call when the find completes successfully.
+     *   <li>error: Function to call when the find fails.
+     *   <li>useMasterKey: In Cloud Code and Node only, causes the Master Key to
+     *     be used for this request.
+     * </ul>
+     *
      * @return {Parse.Promise} A promise that is resolved with the object when
      * the query completes.
      */
     first: function(options) {
       var self = this;
+      options = options || {};
 
       var params = this.toJSON();
       params.limit = 1;
-      var request = Parse._request("classes", this.className, null, "GET",
-                                   params);
+      var request = Parse._request({
+        route: "classes",
+        className: this.className, 
+        method: "GET",
+        useMasterKey: options.useMasterKey,
+        data: params
+      });
 
       return request.then(function(response) {
         return _.map(response.results, function(json) {
@@ -7341,6 +7534,10 @@
      * @return {Parse.Query} Returns the query, so you can chain this call.
      */
     equalTo: function(key, value) {
+      if (_.isUndefined(value)) {
+        return this.doesNotExist(key);
+      } 
+
       this._where[key] = Parse._encode(value);
       return this;
     },
@@ -8424,8 +8621,15 @@
      * of the function.
      */
     run: function(name, data, options) {
-      var request = Parse._request("functions", name, null, 'POST',
-                                   Parse._encode(data, null, true));
+      options = options || {};
+
+      var request = Parse._request({
+        route: "functions",
+        className: name,
+        method: 'POST',
+        useMasterKey: options.useMasterKey,
+        data: Parse._encode(data, null, true)
+      });
 
       return request.then(function(resp) {
         return Parse._decode(null, resp).result;
@@ -8467,6 +8671,8 @@
    * failed.
    */
   Parse.Push.send = function(data, options) {
+    options = options || {};
+
     if (data.where) {
       data.where = data.where.toJSON().where;
     }
@@ -8483,7 +8689,12 @@
       throw "Both expiration_time and expiration_time_interval can't be set";
     }
 
-    var request = Parse._request('push', null, null, 'POST', data);
+    var request = Parse._request({
+      route: 'push',
+      method: 'POST',
+      data: data,
+      useMasterKey: options.useMasterKey
+    });
     return request._thenRunCallbacks(options);
   };
 }(this));

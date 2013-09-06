@@ -4,7 +4,7 @@ The Parse Javascript SDK as an asset for Rails.
 
 This gem provides:
 
-- Parse Javascript SDK 1.2.9
+- Parse Javascript SDK 1.2.10
 
 ## Installation
 
